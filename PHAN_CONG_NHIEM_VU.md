@@ -1,400 +1,266 @@
-# Phân chia nhiệm vụ dự án
+# Phân Chia Nhiệm Vụ Dự Án (Bản Nâng Cấp Chuyên Sâu)
 
 # Shared Message Queues trong Linux IPC bằng ngôn ngữ C
 
+---
 
-## Nhóm làm việc thống nhất
+## 1. Đánh Giá Tổng Quan & Định Hướng Nâng Cấp (Chuyên Môn)
 
-### Quy trình Git
+### 1.1. Hiện trạng bản thiết kế ban đầu
+- **Về độ rộng (Scope):** Bản thiết kế sơ khai chỉ xoay quanh 4 command cơ bản (`PING`, `TIME`, `FIB`, `UPPER`) và luồng giao tiếp tuần tự đơn giản. Tổng lượng mã nguồn ước tính chỉ khoảng 500–700 dòng C.
+- **Về phân bổ công việc cho 4 người:**
+  - *Thành viên 1 (Queue core):* Nhiệm vụ chỉ bọc các hàm `mq_*` cơ bản, khối lượng quá ít (~150 dòng C), dễ xong sớm và thiếu "đất diễn" kỹ thuật.
+  - *Thành viên 2 (Server):* Server chạy vòng lặp đơn luồng (single-thread), nếu gặp tác vụ nặng (như tính toán CPU-bound) sẽ chặn toàn bộ hệ thống.
+  - *Thành viên 3 (Client & Demo):* Chỉ gửi 1 request rồi thoát, kịch bản demo đơn điệu, thiếu công cụ đo kiểm tải và trải nghiệm người dùng tương tác.
+  - *Thành viên 4 (Build, Test, Docs):* Nặng về tài liệu nhưng nhẹ về lập trình hệ thống; thiếu các công cụ phân tích an toàn bộ nhớ (Valgrind, AddressSanitizer) và tự động hóa CI/Test harness.
 
-Nhánh chính:
+### 1.2. Định hướng nâng cấp chuẩn đồ án Hệ điều hành / Lập trình Hệ thống Linux (Điểm 10/10)
+Để 4 thành viên đều có khối lượng công việc cân bằng, có chiều sâu kỹ thuật thực thụ và tự tin bảo vệ trước hội đồng, dự án được mở rộng thêm các trụ cột:
+1. **IPC Core nâng cao:** Hỗ trợ Message Priority thực thụ, Non-blocking/Timed I/O (`mq_timedsend`, `mq_timedreceive`), và cơ chế bất đồng bộ `mq_notify` (Signal / Thread event) cùng công cụ dọn dẹp queue rác (`ipc_cleanup`).
+2. **Server Concurrency & System Services:** Server đa luồng với **Worker Thread Pool** (xử lý song song nhiều request, không bị nghẽn), mở rộng tập lệnh Linux OS (`SYSINFO`, `STATS`, `CALC`, `ECHO`), xử lý Signal an toàn (`SIGINT`, `SIGTERM` dọn dẹp tài nguyên tuyệt đối).
+3. **Client Ecosystem & Benchmark Tool:** Bổ sung **Interactive REPL Shell** (giao diện dòng lệnh tương tác trực tiếp) và **Load Generator / Benchmark Tool** (đo lường Throughput req/s, Latency p95/p99 khi hàng trăm client bắn cùng lúc).
+4. **DevOps, Memory Sanitizers & Automated Test Harness:** Tích hợp AddressSanitizer (`-fsanitize=address,undefined`), kiểm tra rò rỉ bộ nhớ với Valgrind, bộ kịch bản Chaos Test (kill đột ngột, buffer overflow attack) và tài liệu so sánh chuyên sâu (POSIX mqueue vs FIFO vs UNIX Domain Sockets vs Shared Memory).
 
-```text
-main
-```
+---
 
-Nhánh feature đề xuất:
+## 2. Quy Trình Phối Hợp & Git Workflow
 
-```text
-feature/tv1-mqueue-core
-feature/tv2-server-protocol
-feature/tv3-client-demo
-feature/tv4-build-test-docs
-```
+### 2.1. Cấu trúc nhánh
+- **Nhánh chính:** `main` (chỉ merge mã nguồn đã qua test và review).
+- **Nhánh phát triển tích hợp:** `develop` (nhánh tích hợp chung trước khi phát hành phiên bản).
+- **Các nhánh tính năng (Feature branches):**
+  - `feature/tv1-ipc-mqueue-core`
+  - `feature/tv2-server-threadpool`
+  - `feature/tv3-client-repl-benchmark`
+  - `feature/tv4-build-valgrind-testsuite`
 
-Quy tắc làm việc:
+### 2.2. Quy tắc làm việc nhóm
+1. Tuyệt đối không commit trực tiếp vào `main` và `develop`.
+2. Mỗi Pull Request (PR) phải có ít nhất **1 thành viên khác review và phê duyệt**.
+3. Trước khi tạo PR, mã nguồn phải biên dịch sạch không warning (`-Wall -Wextra -Werror -pedantic`).
+4. Không commit file binary, file `.o`, log, hoặc queue ảo `/dev/mqueue/*`.
+5. Khi thay đổi cấu trúc protocol trong `protocol.h`, bắt buộc phải thông báo toàn nhóm để đồng bộ.
 
-1. Không commit trực tiếp vào `main`.
-2. Cập nhật `main` trước khi tạo nhánh mới.
-3. Tự kiểm thử phần mình phụ trách.
-4. Tạo Pull Request.
-5. Ít nhất một thành viên khác review.
-6. Merge chỉ khi build thành công.
-7. Khi sửa protocol phải cập nhật server, client và tài liệu cùng lúc.
+---
 
+## 3. Phân Công Chi Tiết Cho Từng Thành Viên
 
+### THÀNH VIÊN 1: IPC Core Engine, Asynchronous Notification & Resource Management
 
+#### Mục tiêu chuyên môn
+Xây dựng lớp trừu tượng (abstraction layer) vững chắc cho POSIX Message Queue, đảm bảo an toàn bộ nhớ, hỗ trợ non-blocking, priority message, cơ chế bất đồng bộ `mq_notify` và công cụ phục hồi tài nguyên hệ thống.
 
-Không commit thư mục build, binary, queue test hoặc dữ liệu cá nhân.
+#### Nhiệm vụ cụ thể
+1. **Thiết kế & cài đặt thư viện lõi (`include/ipc_queue.h`, `src/ipc_queue.c`):**
+   - Đóng gói an toàn các POSIX API: `mq_open`, `mq_send`, `mq_receive`, `mq_timedsend`, `mq_timedreceive`, `mq_close`, `mq_unlink`, `mq_getattr`, `mq_setattr`.
+   - Cung cấp cơ chế phân cấp ưu tiên message (**Message Priority**): `PRIO_LOW (0)`, `PRIO_NORMAL (10)`, `PRIO_HIGH (20)`, `PRIO_URGENT (30)`.
+   - Hỗ trợ cả 2 chế độ I/O: **Blocking** (chờ với timeout) và **Non-blocking** (`O_NONBLOCK`).
+2. **Cơ chế Asynchronous Notification (`mq_notify`):**
+   - Nghiên cứu và hiện thực hóa việc đăng ký nhận thông báo bất đồng bộ qua POSIX Signal (`SIGEV_SIGNAL`) hoặc tạo thread mới (`SIGEV_THREAD`) khi có tin nhắn mới vào queue rỗng.
+3. **Tiện ích giám sát và dọn dẹp hệ thống (`src/ipc_cleanup.c`):**
+   - Viết binary độc lập `bin/ipc_cleanup` hỗ trợ quét thư mục `/dev/mqueue/`, phát hiện các queue mồ côi (orphaned queues) do tiến trình bị crash đột ngột (`kill -9`) và ép dọn dẹp sạch sẽ.
+4. **Kiểm soát lỗi IPC chặt chẽ:**
+   - Xử lý triệt để các mã lỗi: `EEXIST`, `ENOENT`, `EMSGSIZE`, `EAGAIN`, `ETIMEDOUT`, `EACCES`, `EINTR`.
 
-## Thành viên 1 — Queue Core
-
-### Mục tiêu
-
-Xây dựng module nền tảng thao tác POSIX Message Queue và xử lý lỗi IPC.
-
-### Việc cần làm
-
-- Viết `include/mqueue.h`.
-- Viết `src/mqueue.c`.
-- Đóng gói `mq_open()` thành hàm mở hoặc tạo queue.
-- Viết hàm gửi và nhận message.
-- Viết hàm đóng và hủy queue.
-- Kiểm tra thuộc tính queue bằng `mq_getattr()`.
-- Xử lý các lỗi:
-  - Queue không tồn tại.
-  - Queue đã tồn tại.
-  - Queue đầy.
-  - Message quá dài.
-  - Không có quyền truy cập.
-  - Tham số không hợp lệ.
-
-### Hàm đề xuất
-
+#### Các hàm & cấu trúc đề xuất
 ```c
-mqd_t mq_open_queue(const char *name, int flags, mode_t mode,
-                    const struct mq_attr *attr);
+// include/ipc_queue.h
+typedef enum {
+    MSG_PRIO_LOW = 0,
+    MSG_PRIO_NORMAL = 10,
+    MSG_PRIO_HIGH = 20,
+    MSG_PRIO_URGENT = 30
+} MessagePriority;
 
-int mq_send_message(mqd_t queue, const char *message,
-                    size_t length, unsigned int priority);
+typedef struct {
+    int max_messages;       // Thường là 10
+    size_t max_msg_size;    // Thường là 256 bytes
+    int is_nonblocking;     // 1: O_NONBLOCK, 0: Blocking
+} QueueConfig;
 
-ssize_t mq_receive_message(mqd_t queue, char *buffer,
-                           size_t buffer_size, unsigned int *priority);
-
-int mq_close_queue(mqd_t queue);
-int mq_unlink_queue(const char *name);
+mqd_t ipc_queue_open(const char *name, int oflag, mode_t mode, const QueueConfig *config);
+int ipc_queue_send(mqd_t mqdes, const char *msg_ptr, size_t msg_len, MessagePriority prio);
+int ipc_queue_send_timeout(mqd_t mqdes, const char *msg_ptr, size_t msg_len, MessagePriority prio, unsigned int timeout_ms);
+ssize_t ipc_queue_receive(mqd_t mqdes, char *msg_ptr, size_t msg_len, unsigned int *prio);
+ssize_t ipc_queue_receive_timeout(mqd_t mqdes, char *msg_ptr, size_t msg_len, unsigned int *prio, unsigned int timeout_ms);
+int ipc_queue_close(mqd_t mqdes);
+int ipc_queue_unlink(const char *name);
+int ipc_queue_register_notify(mqd_t mqdes, void (*notify_function)(union sigval));
 ```
 
-### Sản phẩm
+#### Sản phẩm bàn giao (Deliverables)
+- Module `src/ipc_queue.c` và header `include/ipc_queue.h`.
+- Tiện ích dọn dẹp `src/ipc_cleanup.c` -> biên dịch ra `bin/ipc_cleanup`.
+- Unit test riêng cho IPC Core: `tests/test_ipc_queue.c`.
 
-- Module queue hoạt động.
-- Test gửi và nhận một message.
-- Test tạo queue, mở lại queue và xóa queue.
-- Không để queue tồn tại sau khi kết thúc.
+---
 
-### Hoàn thành khi
+### THÀNH VIÊN 2: Server Architecture, Multi-Threading Worker Pool & System Services
 
-- Server và client có thể dùng chung module.
-- Queue đầy hoặc message quá dài không làm chương trình crash.
-- Lỗi API được kiểm tra và có thông báo rõ ràng.
-- Tên queue và thuộc tính được định nghĩa nhất quán.
+#### Mục tiêu chuyên môn
+Xây dựng Server xử lý tin nhắn trung tâm có khả năng mở rộng cao, áp dụng mô hình **Multi-threaded Worker Pool** (POSIX pthreads) để giải quyết triệt để bài toán thắt cổ chai khi có nhiều client đồng thời, cùng hệ thống dịch vụ đa dạng.
 
-## Thành viên 2 — Server và xử lý protocol
+#### Nhiệm vụ cụ thể
+1. **Thiết kế Protocol & Data Serialization (`include/protocol.h`, `src/protocol.c`):**
+   - Chuẩn hóa định dạng Request: `<CLIENT_PID>|<COMMAND>|<PRIORITY>|<PAYLOAD>`.
+   - Chuẩn hóa định dạng Response: `<STATUS_CODE>|<EXEC_TIME_MS>|<PAYLOAD>`.
+   - Viết parser an toàn, kiểm tra độ dài buffer, chống buffer overflow và injection.
+2. **Kiến trúc Server Đa Luồng (`src/server.c`, `src/worker_pool.c`):**
+   - *Master Thread (Listener):* Liên tục lắng nghe tại queue `/shared_requests`. Khi nhận được request, đưa vào hàng đợi công việc nội bộ (Internal Job Queue).
+   - *Worker Thread Pool (N worker threads):* Lấy request từ Job Queue, thực thi command độc lập và gửi response về `/shared_responses_<PID>` của client tương ứng. Không để một request nặng làm chậm các request khác.
+3. **Triển khai các Dịch vụ Nghiệp vụ (System Services):**
+   - `PING`: Trả về `PONG` (Heartbeat check).
+   - `TIME`: Trả về thời gian hệ thống định dạng chuẩn ISO 8601 / RFC 2822.
+   - `FIB <n>`: Tính số Fibonacci (xác thực số nguyên không âm $0 \le n \le 45$).
+   - `UPPER <str>`: Biến đổi chuỗi thành chữ hoa.
+   - `SYSINFO`: Đọc và trích xuất thông tin Linux từ `/proc/loadavg`, `/proc/meminfo`, `/proc/uptime` (đặc trưng chuyên sâu của Linux Systems).
+   - `STATS`: Trả về số liệu vận hành server (tổng số request đã xử lý, số request lỗi, số worker đang bận, uptime của server).
+4. **Graceful Shutdown & Signal Handling:**
+   - Bắt các tín hiệu `SIGINT` (Ctrl+C), `SIGTERM`.
+   - Khi nhận tín hiệu: Ngừng nhận request mới, đợi các worker hoàn thành công việc đang dở (drain workers), hủy queue `/shared_requests`, giải phóng bộ nhớ sạch sẽ trước khi thoát.
 
-### Mục tiêu
+#### Sản phẩm bàn giao (Deliverables)
+- Mã nguồn Server: `src/server.c`, `src/worker_pool.c`, `include/worker_pool.h`.
+- Mã nguồn Protocol: `src/protocol.c`, `include/protocol.h`.
+- Unit test kiểm thử parser: `tests/test_protocol.c`.
 
-Viết server nhận request, thực hiện command và gửi response về queue riêng của client.
+---
 
-### Việc cần làm
+### THÀNH VIÊN 3: Client Ecosystem, Interactive REPL & Load Generator / Benchmarking
 
-- Viết `src/server.c`.
-- Viết hoặc cập nhật `include/protocol.h`.
-- Mở hoặc tạo `/shared_requests`.
-- Nhận message trong vòng lặp liên tục.
-- Phân tích request theo format:
+#### Mục tiêu chuyên môn
+Xây dựng hệ sinh thái phía Client hoàn chỉnh, bao gồm giao diện tương tác người dùng thời gian thực (Interactive REPL Shell) và công cụ giả lập tải cực hạn (Stress & Benchmark Tool) để kiểm chứng năng lực của hệ thống IPC.
 
-```text
-<PID>|<COMMAND>|<ARGUMENT>
+#### Nhiệm vụ cụ thể
+1. **Phát triển Client đa chế độ (`src/client.c`):**
+   - **Chế độ 1 - One-shot Mode:** Chạy 1 lệnh từ command-line rồi thoát (phục vụ script và kiểm thử):
+     ```bash
+     ./bin/client --cmd "FIB 20" --prio HIGH
+     ```
+   - **Chế độ 2 - Interactive REPL Mode:** Giao diện shell tương tác có dấu nhắc lệnh `client-ipc> `, hỗ trợ nhập lệnh liên tục, hiển thị trạng thái kết nối, mã màu ANSI trực quan (Success: xanh, Error: đỏ).
+   - Quản lý vòng đời queue response riêng `/shared_responses_<PID>`: Tạo khi khởi động, dọn dẹp triệt để khi thoát hoặc bị gián đoạn.
+2. **Cơ chế Timeout & Deadlock Prevention:**
+   - Dùng `mq_timedreceive()`: Nếu server không phản hồi sau $T$ giây (mặc định 3s), client thông báo lỗi timeout rõ ràng thay vì bị treo vô tận.
+3. **Phát triển Công cụ Đo tải & Benchmark (`src/benchmark.c`):**
+   - Viết chương trình `bin/benchmark` độc lập:
+     - Cho phép cấu hình số tiến trình client đồng thời (concurrency: 5, 10, 50, 100 process).
+     - Cho phép cấu hình tổng số request (1.000 – 10.000 requests).
+     - Đo đạc và in báo cáo hiệu năng:
+       + Throughput: Requests/sec (RPS).
+       + Round-Trip Latency: Min, Max, Average, p95, p99 (tính bằng microsecond $\mu s$).
+       + Tỷ lệ gói tin thành công / lỗi / timeout.
+4. **Kịch bản Demo Tự Động (`demo/demo.sh`):**
+   - Viết script tự động chạy kịch bản trực quan cho buổi bảo vệ đồ án:
+     - Kịch bản 1: Kiểm tra lần lượt các lệnh chức năng.
+     - Kịch bản 2: 10 client đồng thời gửi request với các mức ưu tiên khác nhau (Priority Inversion Check).
+     - Kịch bản 3: Xử lý tình huống server tắt đột ngột hoặc gửi command lỗi.
+
+#### Sản phẩm bàn giao (Deliverables)
+- Mã nguồn Client: `src/client.c` (biên dịch ra `bin/client`).
+- Mã nguồn Benchmark Tool: `src/benchmark.c` (biên dịch ra `bin/benchmark`).
+- Script demo hoàn chỉnh: `demo/demo.sh`.
+
+---
+
+### THÀNH VIÊN 4: Build System, Automated Test Harness, Memory Profiling & Documentation
+
+#### Mục tiêu chuyên môn
+Đảm bảo toàn bộ dự án tuân thủ tiêu chuẩn kỹ thuật phần mềm chuẩn công nghiệp: build tự động, phát hiện rò rỉ bộ nhớ (Memory Leaks/Corruption) bằng Valgrind/ASan, bộ test tự động toàn diện và bộ hồ sơ tài liệu/slide bảo vệ hoàn hảo.
+
+#### Nhiệm vụ cụ thể
+1. **Thiết kế Makefile chuyên nghiệp (`Makefile`):**
+   - Hỗ trợ các targets: `all`, `server`, `client`, `benchmark`, `cleanup`, `test`, `clean`.
+   - Chế độ biên dịch nghiêm ngặt: `-Wall -Wextra -Werror -pedantic -std=gnu11`.
+   - Target hỗ trợ Debug & Sanitizer: `make debug` (bật `-fsanitize=address,undefined -g`).
+   - Target kiểm tra rò rỉ bộ nhớ: `make valgrind` (chạy Valgrind Memcheck tự động).
+2. **Xây dựng Automated Integration Test Suite (`tests/`):**
+   - Viết `tests/test_integration.sh`: Script tự động spawn server ngầm, kích hoạt hàng loạt test cases, kiểm tra mã trả về, xác minh queue không bị rò rỉ trong `/dev/mqueue/`, và tự động tắt server.
+   - Viết **Chaos / Resilience Tests:**
+     - Test gửi payload tối đa 256 bytes và vượt quá 256 bytes.
+     - Test gửi ký tự đặc biệt, định dạng sai (`|||`).
+     - Test kill đột ngột client/server xem queue có bị kẹt không.
+3. **Báo cáo Chuyên sâu về Linux IPC (`docs/` & `README.md`):**
+   - Viết báo cáo phân tích, so sánh kỹ thuật:
+     - **POSIX Message Queue vs System V Message Queue**.
+     - **Message Queue vs UNIX Domain Sockets vs Shared Memory + Semaphore**.
+     - Khi nào nên dùng loại nào trong kiến trúc hệ thống phân tán nội bộ Linux?
+   - Vẽ sơ đồ kiến trúc hệ thống (Architecture Diagram) và sơ đồ tuần tự (Sequence Diagram) bằng Mermaid / SVG.
+4. **Soạn thảo Slide Báo cáo & Video/Demo Script:**
+   - Chuẩn bị slide thuyết trình (tối thiểu 15-20 slide) phân định rõ phần nói của từng bạn.
+   - Chuẩn bị Checklist nghiệm thu trước khi nộp bài.
+
+#### Sản phẩm bàn giao (Deliverables)
+- Hệ thống build: `Makefile`.
+- Bộ kịch bản kiểm thử: `tests/test_integration.sh`, `tests/test_chaos.sh`.
+- Tài liệu đồ án: `README.md`, `docs/IPC_COMPARISON.md`, `docs/ARCHITECTURE.md`.
+- Slide thuyết trình: `docs/presentation_slides.pdf` (hoặc PPTX).
+
+---
+
+## 4. Ma Trận Kỹ Năng & Khối Lượng Công Việc Đối Chiếu
+
+| Thành viên | Trọng tâm chính | Mã nguồn phụ trách | Khối lượng ước tính | Chiều sâu kỹ thuật (Technical Depth) |
+|---|---|---|:---:|---|
+| **TV1** | IPC Core & System Cleanup | `ipc_queue.c`, `ipc_cleanup.c`, `ipc_queue.h` | 300 - 450 dòng C | POSIX IPC internals, Non-blocking, Timeout, Message Priority, `mq_notify`, `/dev/mqueue` filesystem |
+| **TV2** | Server & Concurrency Engine | `server.c`, `worker_pool.c`, `protocol.c` | 450 - 600 dòng C | Pthreads, Thread Pool, Synchronization (Mutex/Cond), Signal Handling, Protocol Serialization, Linux `/proc` stats |
+| **TV3** | Client, REPL & Benchmarking | `client.c`, `benchmark.c`, `demo.sh` | 400 - 550 dòng C + Script | Interactive CLI, High-concurrency Load Generator, Throughput/Latency calculation, Multi-process orchestration |
+| **TV4** | Build, Test Harness & Analysis | `Makefile`, `test_integration.sh`, Test cases, Docs | 350+ dòng Script/C + Báo cáo | Make toolchain, AddressSanitizer, Valgrind profiling, Chaos Testing, Phân tích so sánh IPC Architecture |
+
+---
+
+## 5. Lộ Trình Triển Khai Theo Giai Đoạn (Milestones)
+
+```mermaid
+gantt
+    title Kế hoạch Triển khai Đồ án Linux IPC Message Queue (4 Tuần)
+    dateFormat  YYYY-MM-DD
+    section Giai đoạn 1: Chuẩn bị
+    Thống nhất Protocol & Tạo khung dự án (TV1, TV2, TV4) :2026-11-03, 4d
+    Makefile cơ bản & Tạo repo Git (TV4)                   :2026-11-03, 3d
+    section Giai đoạn 2: Lõi hệ thống
+    IPC Queue Wrapper + Nonblocking + Timeout (TV1)        :2026-11-07, 6d
+    Protocol Parser & Serialize/Deserialize (TV2)          :2026-11-07, 5d
+    Client One-shot cơ bản (TV3)                          :2026-11-10, 4d
+    section Giai đoạn 3: Tính năng nâng cao
+    Worker Thread Pool Server + Services (TV2)             :2026-11-13, 7d
+    Asynchronous Notification & Cleanup Tool (TV1)         :2026-11-13, 6d
+    Client REPL Shell + Benchmark Tool (TV3)               :2026-11-15, 6d
+    section Giai đoạn 4: Kiểm thử & Đóng gói
+    Integration Test + Chaos Test + Valgrind (TV4)         :2026-11-20, 5d
+    Kịch bản Demo trực quan (TV3, TV4)                     :2026-11-23, 4d
+    Hoàn thiện Báo cáo, So sánh IPC & Slide (Cả nhóm)      :2026-11-25, 5d
 ```
 
-- Thực hiện command `PING`, `TIME`, `FIB`, `UPPER`.
-- Kiểm tra số nguyên Fibonacci hợp lệ.
-- Chuyển chuỗi sang chữ hoa.
-- Tính queue response từ PID.
-- Gửi response theo format `STATUS|MESSAGE`.
-- In log request và response.
-- Đăng ký xử lý `SIGINT/SIGTERM` nếu cần.
-- Dọn dẹp queue khi server kết thúc.
+### Chi tiết các mốc:
+- **Mốc 1 (Tuần 1):** Khởi tạo khung dự án, thống nhất cấu trúc thư mục, chuẩn hóa struct trong `protocol.h`, dựng Makefile ban đầu.
+- **Mốc 2 (Tuần 2):** Hoàn thành `ipc_queue.c` và unit test. Ghép nối thành công 1 Client gửi `PING` và 1 Server phản hồi `PONG` thông qua message queue.
+- **Mốc 3 (Tuần 3):** Triển khai Worker Thread Pool cho Server. Hoàn thiện các lệnh nâng cao (`SYSINFO`, `FIB`, `STATS`). Nâng cấp Client REPL và công cụ `benchmark`.
+- **Mốc 4 (Tuần 4):** Chạy kiểm thử toàn diện với Valgrind và Sanitizer. Khắc phục 100% cảnh báo và lỗi rò rỉ tài nguyên. Tổng duyệt kịch bản demo và slide bảo vệ.
 
-### Hàm đề xuất
+---
 
-```c
-int parse_request(const char *input, Request *request);
-int execute_command(const Request *request, char *response,
-                    size_t response_size);
-int send_response_to_client(pid_t client_pid,
-                            const char *response);
-```
+## 6. Phân Công Nhiệm Vụ Thuyết Trình Bảo Vệ (Oral Defense)
 
-### Sản phẩm
+Khi đứng trước hội đồng chấm thi, việc chia phần thuyết trình hợp lý sẽ giúp giảng viên thấy được sự đồng đều và đóng góp thực chất của từng thành viên:
 
-- Server nhận request liên tục.
-- Đủ các command đã thống nhất.
-- Request sai không làm server dừng.
-- Hai client nhận response riêng biệt.
-- Ctrl+C dọn dẹp queue sạch sẽ.
-
-### Hoàn thành khi
-
-- `PING` trả về `OK|PONG`.
-- `FIB 10` trả về `55`.
-- `UPPER xin-chao` trả về `XIN-CHAO`.
-- Command sai trả về lỗi protocol.
-- Không có message response gửi nhầm client.
-
-## Thành viên 3 — Client và kịch bản demo
-
-### Mục tiêu
-
-Viết client dễ sử dụng và script demo minh họa nhiều tiến trình cùng hoạt động.
-
-### Việc cần làm
-
-- Viết `src/client.c`.
-- Nhận command từ dòng lệnh.
-- Lấy PID của client.
-- Tạo `/shared_responses_<PID>`.
-- Kiểm tra queue request tồn tại.
-- Gửi request theo protocol chung.
-- Nhận và hiển thị response.
-- In PID, tên queue, request và response.
-- Đóng và xóa queue response khi kết thúc.
-- Viết `demo/demo.sh`.
-- Demo chạy nhiều client bằng background process.
-- Viết demo `PING`, `TIME`, `FIB`, `UPPER` và stress test.
-
-### Lệnh demo client đề xuất
-
-```bash
-./bin/client PING
-./bin/client TIME
-./bin/client FIB 10
-./bin/client UPPER xin-chao
-```
-
-### Lệnh demo nhiều client
-
-```bash
-./bin/client PING &
-./bin/client FIB 10 &
-./bin/client UPPER linux-ipc &
-wait
-```
-
-### Sản phẩm
-
-- Client chạy bằng dòng lệnh.
-- Script demo chạy được trên Linux/WSL.
-- Response không bị lẫn giữa các client.
-- Không để lại queue response sau demo.
-- Log demo dễ hiểu cho người xem.
-
-### Hoàn thành khi
-
-- Một người xem có thể chạy server, rồi chạy script demo.
-- Mỗi client nhận response tại đúng queue của mình.
-- Script không để process ngầm sau khi kết thúc.
-- Timeout được xử lý khi server không phản hồi.
-
-## Thành viên 4 — Build, kiểm thử và tài liệu
-
-### Mục tiêu
-
-Đảm bảo project build sạch, có test, có tài liệu chạy được và có slide/demo hợp lý.
-
-### Việc cần làm
-
-#### Makefile và build
-
-- Viết `Makefile`.
-- Tạo thư mục `bin/` và `obj/`.
-- Tạo các target:
-  - `all`
-  - `server`
-  - `client`
-  - `clean`
-  - `test`
-  - `run-server`
-  - `run-demo`
-- Liên kết thư viện POSIX phù hợp.
-- Thêm thư mục `include/` vào GCC include path.
-- Có thể thêm cờ `-Wall -Wextra -Werror -pedantic`.
-
-#### Kiểm thử
-
-Viết hoặc tích hợp:
-
-- Test tạo/mở/xóa queue.
-- Test gửi và nhận message.
-- Test queue response của hai client.
-- Test `PING`, `TIME`, `FIB`, `UPPER`.
-- Test command và argument sai.
-- Test queue đầy và message quá dài.
-- Test nhiều client đồng thời.
-- Stress test ít nhất 100 message hoặc theo thống nhất nhóm.
-
-Ví dụ:
-
-```bash
-make clean && make
-make test
-./demo/demo.sh
-```
-
-#### Tài liệu
-
-- Viết hoặc cập nhật `README.md`.
-- Viết hướng dẫn cài đặt GCC và chạy trên Linux/WSL.
-- Chụp log hoặc kết quả demo thực tế.
-- Viết slide thuyết trình.
-- Liệt kê lỗi thường gặp và cách xử lý.
-- Kiểm tra hướng dẫn có thể chạy lại từ máy mới.
-
-#### Sản phẩm
-
-- Project build từ thư mục sạch.
-- Script test chạy lại được.
-- README hoàn chỉnh.
-- Slide demo có kiến trúc và kết quả.
-- Danh sách các queue còn tồn tại sau khi test.
-
-### Hoàn thành khi
-
-- `make clean && make` thành công.
-- Không có warning nghiêm trọng.
-- `make test` hoặc script test có kết quả rõ ràng.
-- Một người khác có thể chạy lại demo theo README.
-- Không còn queue test sau demo.
-
-## 7. Thứ tự thực hiện
-
-### Giai đoạn 1 — Khởi tạo
-
-Người phụ trách chính: Thành viên 4 phối hợp cả nhóm.
-
-- Tạo thư mục và Makefile.
-- Tạo header protocol chung.
-- Thống nhất tên queue và kích thước message.
-- Chia nhánh Git.
-
-Kết quả: Project build được và có interface chung.
-
-### Giai đoạn 2 — Queue core và protocol
-
-Người phụ trách chính: Thành viên 1 và 2.
-
-- Viết queue wrapper.
-- Viết parser request.
-- Viết response cơ bản.
-
-Kết quả: Một message được gửi và nhận thành công.
-
-### Giai đoạn 3 — Ghép server và client
-
-Người phụ trách chính: Thành viên 2 và 3.
-
-- Tạo queue response theo PID.
-- Ghép server với queue wrapper.
-- Ghép client với queue wrapper.
-- Chạy thử `PING`.
-
-Kết quả: Client nhận đúng response của mình.
-
-### Giai đoạn 4 — Demo và kiểm thử
-
-Người phụ trách chính: Thành viên 3 và 4.
-
-- Viết demo nhiều client.
-- Viết test.
-- Chạy stress test.
-- Viết README và slide.
-
-Kết quả: Demo ổn định, không queue rác.
-
-## 8. Danh sách phụ thuộc công việc
-
-| Công việc | Cần hoàn thành trước |
-|---|---|
-| Viết server | Queue wrapper và protocol |
-| Viết client | Queue wrapper và protocol |
-| Ghép server/client | Header chung và tên queue thống nhất |
-| Integration test | Server và client hoạt động |
-| Demo nhiều client | Hai client nhận đúng response riêng |
-| Slide demo | Kết quả build, test và demo thực tế |
-
-## 9. Nhiệm vụ thuyết trình
-
-### Thành viên 1
-
-- POSIX Message Queue là gì.
-- API tạo, gửi, nhận, đóng và xóa queue.
-- Cách xử lý queue đầy và message lỗi.
-
-### Thành viên 2
-
-- Kiến trúc server.
-- Luồng nhận và xử lý request.
-- Command và xử lý response.
-- Cách gửi response đúng client.
-
-### Thành viên 3
-
-- Luồng hoạt động client.
-- Queue response theo PID.
-- Demo nhiều client.
-- Cách tránh lẫn response.
-
-### Thành viên 4
-
-- Makefile và build.
-- Test và stress test.
-- Hướng dẫn chạy project.
-- Kết quả demo và tài liệu.
-
-## 10. Phân công test
-
-| Test | Người phụ trách | Người hỗ trợ |
+| Thành viên | Chủ đề thuyết trình chuyên sâu | Câu hỏi bảo vệ dự kiến cần chuẩn bị |
 |---|---|---|
-| Queue tạo/mở/xóa | Thành viên 1 | Thành viên 4 |
-| Gửi/nhận message | Thành viên 1 | Thành viên 2 |
-| `PING`, `TIME`, `FIB`, `UPPER` | Thành viên 2 | Thành viên 4 |
-| Client nhận đúng queue | Thành viên 3 | Thành viên 2 |
-| Hai client đồng thời | Thành viên 3 | Thành viên 2, 4 |
-| Queue đầy/message dài | Thành viên 1 | Thành viên 4 |
-| Build/stress test | Thành viên 4 | Thành viên 1, 2, 3 |
+| **Thành viên 1** | **Bản chất POSIX Message Queue & Quản lý Tài nguyên OS**<br>- Cơ chế lưu trữ của `/dev/mqueue` trong Linux VFS.<br>- So sánh Blocking vs Non-blocking vs Asynchronous `mq_notify`.<br>- Thuật toán ưu tiên Message Priority hoạt động thế nào trong Kernel? | *Tại sao khi tiến trình bị `kill -9` thì queue vẫn còn trong hệ thống? Công cụ `ipc_cleanup` xử lý việc này ra sao?* |
+| **Thành viên 2** | **Kiến trúc Server Concurrency & Thiết kế Protocol**<br>- Mô hình Thread Pool: Worker synchronization dùng Mutex & Condition Variable.<br>- Thiết kế giao thức an toàn, chống tràn bộ nhớ đệm (Buffer Overflow).<br>- Kỹ thuật Graceful Shutdown và Signal Handling trên Linux. | *Nếu 100 client cùng gửi lệnh `FIB 45` thì Server xử lý ra sao để không làm sập hàng đợi?* |
+| **Thành viên 3** | **Trải nghiệm Client & Phân tích Đánh giá Tải (Benchmarking)**<br>- Thiết kế kiến trúc REPL Shell không chặn.<br>- Phương pháp đo lường Throughput và Latency (p95, p99).<br>- Phân tích hiện tượng tranh chấp (Contention) khi nhiều tiến trình client cùng ghi vào một queue. | *Làm sao đảm bảo Client A không bao giờ đọc nhầm response của Client B trong mô hình Shared Message Queues?* |
+| **Thành viên 4** | **Kiểm định Chất lượng (QA), Độ tin cậy & Đánh giá So sánh**<br>- Quy trình bắt lỗi rò rỉ bộ nhớ với AddressSanitizer & Valgrind.<br>- Kịch bản Chaos Testing: Xử lý ngoại lệ khi hệ thống gặp lỗi.<br>- So sánh hiệu năng và ưu/nhược điểm giữa Message Queue và Socket / Shared Memory. | *Tại sao chọn POSIX Message Queue thay vì UNIX Domain Socket hay Shared Memory trong bài toán này? Đánh đổi là gì?* |
 
-## 11. Checklist bàn giao cá nhân
+---
 
-### Thành viên 1
+## 7. Checklist Nghiệm Thu Đồ Án (Definition of Done - DoD)
 
-- [ ] Queue wrapper hoàn thiện.
-- [ ] Xử lý lỗi IPC đầy đủ.
-- [ ] Test queue hoạt động.
-
-### Thành viên 2
-
-- [ ] Server nhận request liên tục.
-- [ ] Bốn command hoạt động.
-- [ ] Response đúng queue client.
-
-### Thành viên 3
-
-- [ ] Client nhận tham số dòng lệnh.
-- [ ] Queue response theo PID hoạt động.
-- [ ] Script demo nhiều client hoạt động.
-
-### Thành viên 4
-
-- [ ] Makefile build server/client.
-- [ ] `make test` hoạt động.
-- [ ] README và slide hoàn chỉnh.
-
-## 12. Tiêu chí đánh giá
-
-- Hoàn thành đúng phần phụ trách.
-- Hiểu và giải thích được mã của mình.
-- Không vi phạm protocol chung.
-- Phối hợp khi ghép từng module.
-- Tạo Pull Request có review.
-- Viết test hoặc tài liệu liên quan phần phụ trách.
-- Không để queue hoặc process rác.
+- [ ] Toàn bộ mã nguồn biên dịch thành công không có cảnh báo (`-Wall -Wextra -Werror -pedantic`).
+- [ ] Không rò rỉ bộ nhớ (Valgrind báo cáo `0 errors from 0 contexts`, `no leaks are possible`).
+- [ ] Không sót bất kỳ message queue rác nào trong `/dev/mqueue/` sau khi kết thúc chương trình.
+- [ ] Server xử lý đồng thời ít nhất 50 client mà không bị nghẽn (nhờ Worker Thread Pool).
+- [ ] Client có đầy đủ cả chế độ CLI one-shot và Interactive REPL Shell.
+- [ ] Công cụ Benchmark xuất báo cáo Throughput và Latency rõ ràng.
+- [ ] Xử lý an toàn tín hiệu `SIGINT/SIGTERM` với cơ chế Graceful Shutdown.
+- [ ] Toàn bộ các test cases tự động trong `tests/test_integration.sh` đều PASSED.
+- [ ] Tài liệu `README.md` hướng dẫn rõ ràng từ lúc clone repo đến lúc chạy demo.
+- [ ] Có tài liệu so sánh chuyên sâu các cơ chế IPC trên Linux và slide thuyết trình hoàn chỉnh.

@@ -157,16 +157,17 @@ linux-shared-message-queues/
 ├── PHAN_CONG_NHIEM_VU.md
 ├── CAU_TRUC_YEU_CAU.md
 ├── include/
-│   ├── mqueue.h
+│   ├── ipc_queue.h
 │   └── protocol.h
 ├── src/
-│   ├── mqueue.c
+│   ├── ipc_queue.c
+│   ├── protocol.c
 │   ├── server.c
 │   └── client.c
 ├── demo/
 │   └── demo.sh
 └── tests/
-    ├── test_mqueue.c
+    ├── test_ipc_queue.c
     ├── test_protocol.c
     └── test_integration.sh
 ```
