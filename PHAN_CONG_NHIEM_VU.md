@@ -45,7 +45,7 @@
 
 ## 3. Phân Công Chi Tiết Cho Từng Thành Viên
 
-### THÀNH VIÊN 1: IPC Core Engine, Asynchronous Notification & Resource Management
+### VanHuy: IPC Core Engine, Asynchronous Notification & Resource Management
 
 #### Mục tiêu chuyên môn
 Xây dựng lớp trừu tượng (abstraction layer) vững chắc cho POSIX Message Queue, đảm bảo an toàn bộ nhớ, hỗ trợ non-blocking, priority message, cơ chế bất đồng bộ `mq_notify` và công cụ phục hồi tài nguyên hệ thống.

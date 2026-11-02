@@ -1,0 +1,29 @@
+# ==============================================================================
+# .gitignore - Linux Shared Message Queues Project
+# ==============================================================================
+
+# Bo qua cac tep bao cao / ghi chu ca nhan dang .txt
+*.txt
+BAO_CAO_HOAN_THANH_TV1.txt
+
+# Bo qua cac thu muc build va binary
+bin/*
+!bin/.gitkeep
+obj/*
+!obj/.gitkeep
+*.o
+
+# Bo qua cac file thuc thi tam thoi
+test_asan
+
+# Bo qua file core dump he thong
+core
+core.*
+
+# Bo qua file cau hinh editor va IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
