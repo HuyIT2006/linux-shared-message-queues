@@ -95,7 +95,7 @@ int ipc_queue_register_notify(mqd_t mqdes, void (*notify_function)(union sigval)
 
 ---
 
-### THÀNH VIÊN 2: Server Architecture, Multi-Threading Worker Pool & System Services
+### THÀNH VIÊN 2: Ngọc Huy: Server Architecture, Multi-Threading Worker Pool & System Services
 
 #### Mục tiêu chuyên môn
 Xây dựng Server xử lý tin nhắn trung tâm có khả năng mở rộng cao, áp dụng mô hình **Multi-threaded Worker Pool** (POSIX pthreads) để giải quyết triệt để bài toán thắt cổ chai khi có nhiều client đồng thời, cùng hệ thống dịch vụ đa dạng.
