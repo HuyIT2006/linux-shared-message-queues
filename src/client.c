@@ -378,16 +378,27 @@ static int client_repl(void)
         }
 
 	
-        if (client_execute(
-                &ctx,
-                input,
-                current_priority) == -1)
-        {
-            fprintf(stderr,
-                    "Failed to execute command: %s\n",
-                    input);
-        }
+	int result = client_execute(
+    &ctx,
+    input,
+    current_priority
+);
 
+if (result == -2)
+{
+    fprintf(stderr,
+            "Fatal IPC error. Closing REPL session.\n");
+
+    client_cleanup(&ctx);
+    return EXIT_FAILURE;
+}
+
+if (result == -1)
+{
+    fprintf(stderr,
+            "Failed to execute command: %s\n",
+            input);
+}
     }
     client_cleanup(&ctx);
     return EXIT_SUCCESS;
@@ -526,7 +537,7 @@ static int client_execute(
             CLIENT_TIMEOUT_MS) == -1)
     {
         perror("ipc_queue_send_timeout");
-        return -1;
+        return -2;
     }
 
     ssize_t received = ipc_queue_receive_timeout(
@@ -537,7 +548,9 @@ static int client_execute(
         CLIENT_TIMEOUT_MS
     );
 
-    if (received == -1)
+    if (received 
+
+== -1)
     {
         if (errno == ETIMEDOUT)
         {
@@ -549,7 +562,7 @@ static int client_execute(
             perror("ipc_queue_receive_timeout");
         }
 
-        return -1;
+        return -2;
     }
 
     response_buffer[received] = '\0';
