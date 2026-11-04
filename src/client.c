@@ -13,8 +13,74 @@
 
 #define CLIENT_TIMEOUT_MS 3000
 
-int main(void)
+int main(int argc, char *argv[])
 {
+
+    const char *command_input = "PING";
+    const char *priority_input = "NORMAL";
+
+    for (int i = 1; i < argc; i++)
+    {
+        if (strcmp(argv[i], "--cmd") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "Missing value for --cmd\n");
+                return EXIT_FAILURE;
+            }
+            command_input = argv[++i];
+        }
+        else if (strcmp(argv[i], "--prio") == 0)
+        {
+            if (i + 1 >= argc)
+            {
+                fprintf(stderr, "Missing value for --prio\n");
+                return EXIT_FAILURE;
+            }
+            priority_input = argv[++i];
+        }
+        else
+        {
+            fprintf(stderr, "Unknown argument: %s\n", argv[i]);
+            return EXIT_FAILURE;
+        }
+    }
+
+    MessagePriority priority;
+
+    if (protocol_parse_priority(priority_input, &priority) != 0)
+    {
+        fprintf(stderr, "Invalid priority: %s\n", priority_input);
+        return EXIT_FAILURE;
+    }
+
+    char command[PROTO_MAX_CMD_LEN];
+    char payload[PROTO_MAX_PAYLOAD_LEN];
+
+    const char *space = strchr(command_input, ' ');
+    size_t command_len = space
+        ? (size_t)(space - command_input)
+        : strlen(command_input);
+
+    if (command_len == 0 || command_len >= sizeof(command))
+    {
+        fprintf(stderr, "Invalid command length\n");
+        return EXIT_FAILURE;
+    }
+
+    memcpy(command, command_input, command_len);
+    command[command_len] = '\0';
+
+    const char *argument = space ? space + 1 : "";
+
+    if (strlen(argument) >= sizeof(payload))
+    {
+        fprintf(stderr, "Payload too long\n");
+        return EXIT_FAILURE;
+    }
+
+    strcpy(payload, argument);
+
     pid_t client_pid = getpid();
 
     char response_queue_name[IPC_QUEUE_NAME_MAX];
@@ -88,9 +154,9 @@ int main(void)
         request_buffer,
         sizeof(request_buffer),
         client_pid,
-        "PING",
-        MSG_PRIO_NORMAL,
-        ""
+        command,
+        priority,
+        payload
     );
 
     if (request_len < 0)
@@ -147,14 +213,16 @@ int main(void)
     printf("\nServer response: %s\n", response_buffer);
 
     if (strncmp(response_buffer, "OK|", 3) == 0)
-    {
-        printf("PING/PONG test PASSED!\n");
-        exit_status = EXIT_SUCCESS;
-    }
-    else
-    {
-        fprintf(stderr, "Server returned an error or invalid response.\n");
-    }
+{
+    printf("Command '%s' executed successfully!\n", command);
+    exit_status = EXIT_SUCCESS;
+}
+else
+{
+    fprintf(stderr,
+            "Command '%s' failed or returned an invalid response.\n",
+            command);
+}
 
 cleanup:
     // Step 8: Close request queue
