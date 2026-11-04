@@ -13,8 +13,36 @@
 
 #define CLIENT_TIMEOUT_MS 3000
 
+/*
+ * Client connection context.
+ * Stores IPC resources for the entire REPL session.
+ */
+typedef struct
+{
+    pid_t pid;
+    mqd_t request_mq;
+    mqd_t response_mq;
+    char response_queue_name[IPC_QUEUE_NAME_MAX];
+} ClientContext;
+
+static int client_repl(void);
+
+static int client_connect(ClientContext *ctx);
+
+static int client_execute(
+    ClientContext *ctx,
+    const char *command_input,
+    MessagePriority priority
+);
+
+static void client_cleanup(ClientContext *ctx);
+
 int main(int argc, char *argv[])
 {
+     if (argc == 1)
+    {
+	return client_repl();
+    }
 
     const char *command_input = "PING";
     const char *priority_input = "NORMAL";
@@ -247,4 +275,339 @@ cleanup:
     printf("Client cleanup completed!\n");
 
     return exit_status;
+}
+
+
+/*
+ * Interactive REPL Shell
+ * Team Member 3 - IPC Client
+ *
+ * Read-Eval-Print Loop:
+ * Read user command, execute and print result.
+ */
+static int client_repl(void)
+{
+    char input[PROTO_MAX_MSG_SIZE];
+    MessagePriority current_priority = MSG_PRIO_NORMAL; 
+    ClientContext ctx = {
+        .pid = 0,
+        .request_mq = (mqd_t)-1,
+        .response_mq = (mqd_t)-1,
+        .response_queue_name = ""
+    };
+
+    if (client_connect(&ctx) == -1)
+    {
+        fprintf(stderr, "Error: Cannot connect to server.\n");
+        return EXIT_FAILURE;
+    }
+
+    printf("\n=================================\n");
+    printf(" Interactive REPL Mode\n");
+    printf("=================================\n");
+    printf("Type 'help' for available commands.\n");
+    printf("Type 'exit' or 'quit' to leave.\n\n");
+
+    while (1)
+    {
+        printf("client-ipc> ");
+        fflush(stdout);
+
+        if (fgets(input, sizeof(input), stdin) == NULL)
+        {
+            printf("\nGoodbye!\n");
+            break;
+        }
+
+        // Remove trailing newline
+        input[strcspn(input, "\n")] = '\0';
+
+        // Ignore empty input
+        if (input[0] == '\0')
+        {
+            continue;
+        }
+
+        // Exit REPL
+        if (strcmp(input, "exit") == 0 ||
+            strcmp(input, "quit") == 0)
+        {
+            printf("Goodbye!\n");
+            break;
+        }
+
+        // Show help menu
+        if (strcmp(input, "help") == 0)
+        {
+            printf("\nAvailable commands:\n");
+            printf("  PING          - Check server connection\n");
+            printf("  TIME          - Get server time\n");
+            printf("  FIB <n>       - Calculate Fibonacci\n");
+            printf("  UPPER <text>  - Convert text to uppercase\n");
+            printf("  ECHO <text>   - Echo text\n");
+            printf("  SYSINFO       - Show system information\n");
+            printf("  STATS         - Show server statistics\n");
+            printf("  CALC <expr>   - Calculate expression\n");
+            printf("  help          - Show this menu\n");
+            printf("  exit / quit   - Exit client\n\n");
+	    printf("  priority <level> - Set LOW, NORMAL, HIGH or URGENT\n");
+            continue;
+        }
+
+	
+        if (strncmp(input, "priority ", 9) == 0)
+        {
+            MessagePriority new_priority;
+
+            if (protocol_parse_priority(
+                    input + 9, &new_priority) == 0)
+            {
+                current_priority = new_priority;
+
+                printf("Priority changed to %s (%u)\n",
+                       protocol_priority_to_str(current_priority),
+                       (unsigned int)current_priority);
+            }
+            else
+            {
+                fprintf(stderr,
+                        "Invalid priority. Use LOW, NORMAL, HIGH or URGENT.\n");
+            }
+
+            continue;
+        }
+
+	
+        if (client_execute(
+                &ctx,
+                input,
+                current_priority) == -1)
+        {
+            fprintf(stderr,
+                    "Failed to execute command: %s\n",
+                    input);
+        }
+
+    }
+    client_cleanup(&ctx);
+    return EXIT_SUCCESS;
+}
+
+
+/*
+ * Initialize IPC connection for the client.
+ *
+ * Returns:
+ *   0  - Success
+ *  -1  - Failure
+ */
+static int client_connect(ClientContext *ctx)
+{
+    QueueConfig config = {
+        .max_messages = IPC_DEFAULT_MAX_MSG,
+        .max_msg_size = IPC_DEFAULT_MSG_SIZE,
+        .is_nonblocking = 0
+    };
+
+    ctx->pid = getpid();
+    ctx->request_mq = (mqd_t)-1;
+    ctx->response_mq = (mqd_t)-1;
+
+    if (ipc_queue_build_response_name(
+            ctx->response_queue_name,
+            sizeof(ctx->response_queue_name),
+            ctx->pid) == -1)
+    {
+        perror("ipc_queue_build_response_name");
+        return -1;
+    }
+
+    ctx->response_mq = ipc_queue_open(
+        ctx->response_queue_name,
+        O_RDONLY | O_CREAT | O_EXCL,
+        IPC_QUEUE_DEFAULT_MODE,
+        &config
+    );
+
+    if (ctx->response_mq == (mqd_t)-1)
+    {
+        perror("ipc_queue_open response");
+        return -1;
+    }
+
+    ctx->request_mq = ipc_queue_open(
+        IPC_REQUEST_QUEUE_NAME,
+        O_WRONLY,
+        IPC_QUEUE_DEFAULT_MODE,
+        NULL
+    );
+
+    if (ctx->request_mq == (mqd_t)-1)
+    {
+        perror("ipc_queue_open request");
+
+        ipc_queue_close(ctx->response_mq);
+        ctx->response_mq = (mqd_t)-1;
+
+        ipc_queue_unlink(ctx->response_queue_name);
+
+        return -1;
+    }
+
+    printf("Connected to server successfully!\n");
+    printf("Client PID: %ld\n", (long)ctx->pid);
+
+    return 0;
+}
+
+
+/*
+ * Send a command to the server and receive its response.
+ *
+ * Returns:
+ *   0  - Server executed command successfully
+ *  -1  - IPC error or server returned an error
+ */
+static int client_execute(
+    ClientContext *ctx,
+    const char *command_input,
+    MessagePriority priority)
+{
+    char command[PROTO_MAX_CMD_LEN];
+    char payload[PROTO_MAX_PAYLOAD_LEN];
+    char request_buffer[PROTO_MAX_MSG_SIZE];
+    char response_buffer[PROTO_MAX_MSG_SIZE + 1];
+
+    const char *space = strchr(command_input, ' ');
+    size_t command_len = space
+        ? (size_t)(space - command_input)
+        : strlen(command_input);
+
+    if (command_len == 0 ||
+        command_len >= sizeof(command))
+    {
+        fprintf(stderr, "Error: Invalid command length.\n");
+        return -1;
+    }
+
+    memcpy(command, command_input, command_len);
+    command[command_len] = '\0';
+
+    const char *argument = space ? space + 1 : "";
+
+    if (strlen(argument) >= sizeof(payload))
+    {
+        fprintf(stderr, "Error: Payload too long.\n");
+        return -1;
+    }
+
+    strcpy(payload, argument);
+
+    int request_len = protocol_build_request_ext(
+        request_buffer,
+        sizeof(request_buffer),
+        ctx->pid,
+        command,
+        priority,
+        payload
+    );
+
+    if (request_len < 0)
+    {
+        fprintf(stderr, "Error: Cannot build request.\n");
+        return -1;
+    }
+
+    if (ipc_queue_send_timeout(
+            ctx->request_mq,
+            request_buffer,
+            (size_t)request_len,
+            priority,
+            CLIENT_TIMEOUT_MS) == -1)
+    {
+        perror("ipc_queue_send_timeout");
+        return -1;
+    }
+
+    ssize_t received = ipc_queue_receive_timeout(
+        ctx->response_mq,
+        response_buffer,
+        PROTO_MAX_MSG_SIZE,
+        NULL,
+        CLIENT_TIMEOUT_MS
+    );
+
+    if (received == -1)
+    {
+        if (errno == ETIMEDOUT)
+        {
+            fprintf(stderr,
+                    "Error: Server response timed out.\n");
+        }
+        else
+        {
+            perror("ipc_queue_receive_timeout");
+        }
+
+        return -1;
+    }
+
+    response_buffer[received] = '\0';
+
+    printf("Server response: %s\n", response_buffer);
+
+    if (strncmp(response_buffer, "OK|", 3) == 0)
+    {
+        return 0;
+    }
+
+    fprintf(stderr, "Server returned an error.\n");
+    return -1;
+}
+
+
+/*
+ * Release all IPC resources owned by the client.
+ *
+ * Close request/response descriptors and remove
+ * the client-specific response queue.
+ */
+static void client_cleanup(ClientContext *ctx)
+{
+    if (ctx == NULL)
+    {
+        return;
+    }
+
+    if (ctx->request_mq != (mqd_t)-1)
+    {
+        if (ipc_queue_close(ctx->request_mq) == -1)
+        {
+            perror("ipc_queue_close request");
+        }
+
+        ctx->request_mq = (mqd_t)-1;
+    }
+
+    if (ctx->response_mq != (mqd_t)-1)
+    {
+        if (ipc_queue_close(ctx->response_mq) == -1)
+        {
+            perror("ipc_queue_close response");
+        }
+
+        ctx->response_mq = (mqd_t)-1;
+    }
+
+    if (ctx->response_queue_name[0] != '\0')
+    {
+        if (ipc_queue_unlink(ctx->response_queue_name) == -1)
+        {
+            perror("ipc_queue_unlink response");
+        }
+
+        ctx->response_queue_name[0] = '\0';
+    }
+
+    printf("Client cleanup completed!\n");
 }
