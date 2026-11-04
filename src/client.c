@@ -172,7 +172,7 @@ int main(int argc, char *argv[])
             request_mq,
             request_buffer,
             (size_t)request_len,
-            MSG_PRIO_NORMAL,
+            priority,
             CLIENT_TIMEOUT_MS) == -1)
     {
         fprintf(stderr, "Send request failed: %s\n",
