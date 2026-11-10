@@ -27,3 +27,4 @@ core.*
 *.swo
 *~
 .DS_Store
+logs/
